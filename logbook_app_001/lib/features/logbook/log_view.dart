@@ -1,4 +1,3 @@
-import 'package:bson/src/classes/object_id.dart';
 import  'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/material.dart';
 import 'log_controller.dart';
@@ -9,6 +8,7 @@ import '../widgets/search_log.dart';
 import '../widgets/empty_log.dart';
 import '../../helpers/log_helper.dart';
 import '../../services/mongo_service.dart';
+import 'package:intl/intl.dart';
 
 class LogView extends StatefulWidget {
   final User user;
@@ -21,15 +21,38 @@ class LogView extends StatefulWidget {
 
 class _LogViewState extends State<LogView> {
   late LogController _controller;
+  late Future<List<LogModel>> _logsFuture;
   final TextEditingController _titleController = TextEditingController();
   final TextEditingController _contentController = TextEditingController();
   bool _isLoading = false;
+
+  String _formatTimestamp(DateTime date) {
+  final now = DateTime.now();
+  final difference = now.difference(date);
+
+  if (difference.inMinutes < 1) {
+      return "Baru saja";
+    } else if (difference.inMinutes < 60) {
+      return "${difference.inMinutes} menit yang lalu";
+    } else if (difference.inHours < 24) {
+      return "${difference.inHours} jam yang lalu";
+    } else {
+      return DateFormat('dd MMM yyyy, HH:mm').format(date);
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     _controller = LogController();
     Future.microtask(() => _initDatabase());
+    _refreshData();
+  }
+
+  void _refreshData() {
+    setState(() {
+      _logsFuture = MongoService().getLogs();
+    });
   }
 
   Future<void> _initDatabase() async {
@@ -176,36 +199,115 @@ class _LogViewState extends State<LogView> {
         children: [
           SearchBarWidget(onSearch: (value) => _controller.searchLogs(value)),
           Expanded(
-            child: ValueListenableBuilder<List<LogModel>>(
-              valueListenable: _controller.filteredLogsNotifier,
-              builder: (context, currentLogs, child) {
-                if (_isLoading) {
-                  return const Center(child: CircularProgressIndicator());
-                }
+          child: FutureBuilder<List<LogModel>>(
+            future: _logsFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              
+              if (snapshot.hasError) {
+                return Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Image.asset(
+                        'lib/assets/image/no-connection.png',
+                        width: 250,
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) => 
+                            const Icon(Icons.wifi_off_rounded, size: 120, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 30),
+                      
+                      // Judul Error
+                      const Text(
+                        "Koneksi Terputus",
+                        style: TextStyle(
+                          fontSize: 20, 
+                          fontWeight: FontWeight.bold, 
+                          color: Colors.redAccent,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      
+                      // Deskripsi
+                      const Text(
+                        "Aplikasi tidak dapat terhubung ke MongoDB Atlas.\nPastikan perangkat Anda terhubung ke internet yang stabil.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 14, color: Colors.blueGrey, height: 1.5),
+                      ),
+                      const SizedBox(height: 30),
+                      
+                      // Tombol Coba Lagi
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          _refreshData(); 
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Theme.of(context).primaryColor,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        icon: const Icon(Icons.refresh),
+                        label: const Text(
+                          "Coba Lagi",
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                      )
+                    ],
+                  ),
+                );
+              }
 
-                if (_controller.logsNotifier.value.isEmpty) {
-                  return const EmptyLog(isSearchMode: false);
-                }
+              // 3. Menangani Data Kosong
+              if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                return const EmptyLog(isSearchMode: false);
+              }
 
-                if (currentLogs.isEmpty && _controller.lastQuery.isNotEmpty) {
-                  return EmptyLog(isSearchMode: true, searchQuery: _controller.lastQuery);
-                }
+              final logs = snapshot.data!;
 
-                return ListView.builder(
-                  itemCount: currentLogs.length,
-                  itemBuilder: (context, index) {
-                    final log = currentLogs[index];
+              return RefreshIndicator(
+              onRefresh: () async {
+                _refreshData();
+                await _logsFuture; 
+              },
+              child: ListView.builder(
+              itemCount: logs.length,
+              itemBuilder: (context, index) {
+              final log = logs[index];
                     return Dismissible(
-                      key: Key(log.id?.toHexString() ?? log.date.toString()), // Gunakan ID yang unik
+                      key: Key(log.date.toString()), // Gunakan ID yang unik
                       direction: DismissDirection.endToStart,
                       background: _buildDeleteBackground(),
-                      onDismissed: (direction) => _controller.removeLog(log), // PERBAIKAN: Kirim Objek log
+                      onDismissed: (direction) => _controller.removeLog(log), 
                       child: Card(
                         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         child: ListTile(
                           leading: VerticalDivider(color: log.categoryColor, thickness: 6),
                           title: Text(log.title, style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text(log.description),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start, 
+                            mainAxisSize: MainAxisSize.min, 
+                            children: [
+                              Text(log.description),
+                              const SizedBox(height: 4), 
+                              Text(
+                                DateFormat('dd MMM yyyy, HH:mm').format(log.date),
+                                style: const TextStyle(
+                                  fontSize: 12, 
+                                  color: Colors.blueGrey, 
+                                  fontStyle: FontStyle.italic
+                                ),
+                              ),
+                            ],
+                          ),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -215,7 +317,7 @@ class _LogViewState extends State<LogView> {
                               ),
                               IconButton(
                                 icon: const Icon(Icons.delete, color: Colors.red),
-                                onPressed: () => _controller.removeLog(log), // PERBAIKAN: Kirim Objek log
+                                onPressed: () => _controller.removeLog(log), 
                               ),
                             ],
                           ),
@@ -223,6 +325,7 @@ class _LogViewState extends State<LogView> {
                       ),
                     );
                   },
+                )
                 );
               },
             ),
